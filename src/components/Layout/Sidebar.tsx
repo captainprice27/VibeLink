@@ -13,7 +13,7 @@ interface User {
 }
 
 interface Conversation {
-  _id: string;
+  id: string;
   otherParticipant: User;
   lastMessage?: {
     content: string;
@@ -138,7 +138,7 @@ export default function Sidebar({ onSelectConversation, activeConversationId }: 
                     <div
                       key={user.id}
                       className={`contact-item ${
-                        activeConversationId === conversation?._id ? 'active' : ''
+                        activeConversationId === conversation?.id ? 'active' : ''
                       }`}
                       onClick={() => handleUserClick(user)}
                     >
@@ -189,7 +189,7 @@ export default function Sidebar({ onSelectConversation, activeConversationId }: 
                     <div
                       key={user.id}
                       className={`contact-item ${
-                        activeConversationId === conversation?._id ? 'active' : ''
+                        activeConversationId === conversation?.id ? 'active' : ''
                       }`}
                       onClick={() => handleUserClick(user)}
                     >

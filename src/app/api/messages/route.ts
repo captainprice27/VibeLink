@@ -53,7 +53,8 @@ export async function GET(request: NextRequest) {
             },
             {
                 $project: {
-                    _id: 1,
+                    id: '$_id',
+                    _id: 0,
                     content: 1,
                     status: 1,
                     createdAt: 1,

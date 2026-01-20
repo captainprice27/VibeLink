@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
 import { Providers } from '@/components/Providers';
+import { SocketProvider } from '@/components/SocketProvider';
 import Footer from '@/components/Layout/Footer';
 
 const inter = Inter({ subsets: ['latin'] });
@@ -22,10 +23,12 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         <Providers>
-          <div className="app-container">
-            {children}
-            <Footer />
-          </div>
+          <SocketProvider>
+            <div className="app-container">
+              {children}
+              <Footer />
+            </div>
+          </SocketProvider>
         </Providers>
       </body>
     </html>

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useSession } from 'next-auth/react';
 import { format } from 'date-fns';
+import { useSocket } from '@/components/SocketProvider';
 
 interface Message {
   id: string;
@@ -34,21 +35,137 @@ interface ChatWindowProps {
 
 export default function ChatWindow({ conversationId, otherUser }: ChatWindowProps) {
   const { data: session } = useSession();
+  const { socket, isConnected, sendMessage, markAsDelivered, markAsSeen } = useSocket();
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [typingUser, setTypingUser] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  const currentUserId = (session?.user as { id: string })?.id;
+
+  // Fetch initial messages
   useEffect(() => {
     if (conversationId) {
       fetchMessages();
     }
   }, [conversationId]);
 
+  // Join conversation room and set up socket listeners
+  useEffect(() => {
+    if (!socket || !conversationId || !currentUserId) return;
+
+    console.log('🔌 Joining conversation:', conversationId);
+    socket.emit('conversation:join', conversationId);
+
+    // Listen for new messages
+    const handleNewMessage = (data: { conversationId: string; message: Message; senderId: string }) => {
+      if (data.conversationId === conversationId) {
+        console.log('📩 New message received:', data.message);
+        setMessages((prev) => {
+          // Prevent duplicates
+          if (prev.find((m) => m.id === data.message.id)) return prev;
+          return [...prev, data.message];
+        });
+
+        // Mark as delivered immediately
+        if (data.senderId !== currentUserId) {
+          setTimeout(() => {
+            markAsDelivered(conversationId, [data.message.id], currentUserId);
+          }, 100);
+
+          // Mark as seen (simulate user viewing the message)
+          setTimeout(() => {
+            markAsSeen(conversationId, [data.message.id], currentUserId);
+          }, 1000);
+        }
+
+        scrollToBottom();
+      }
+    };
+
+    // Listen for message sent confirmation
+    const handleMessageSent = (data: { tempId: string; messageId: string; status: string }) => {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === data.tempId
+            ? { ...m, id: data.messageId, status: 'sent' as any }
+            : m
+        )
+      );
+    };
+
+    // Listen for delivery status updates
+    const handleDelivered = (data: { messageIds: string[]; userId: string; status: string }) => {
+      console.log('✅ Messages delivered:', data.messageIds);
+      setMessages((prev) =>
+        prev.map((m) =>
+          data.messageIds.includes(m.id) && m.senderId === currentUserId
+            ? { ...m, status: 'delivered' as any }
+            : m
+        )
+      );
+    };
+
+    // Listen for seen status updates
+    const handleSeen = (data: { messageIds: string[]; userId: string; status: string }) => {
+      console.log('👁️ Messages seen:', data.messageIds);
+      setMessages((prev) =>
+        prev.map((m) =>
+          data.messageIds.includes(m.id) && m.senderId === currentUserId
+            ? { ...m, status: 'seen' as any }
+            : m
+        )
+      );
+    };
+
+    // Listen for typing indicators
+    const handleTyping = (data: { conversationId: string; userId: string; userName: string; isTyping: boolean }) => {
+      if (data.conversationId === conversationId && data.userId !== currentUserId) {
+        setIsTyping(data.isTyping);
+        setTypingUser(data.isTyping ? data.userName : null);
+      }
+    };
+
+    socket.on('message:new', handleNewMessage);
+    socket.on('message:sent', handleMessageSent);
+    socket.on('message:status:delivered', handleDelivered);
+    socket.on('message:status:seen', handleSeen);
+    socket.on('typing:user', handleTyping);
+
+    return () => {
+      socket.off('message:new', handleNewMessage);
+      socket.off('message:sent', handleMessageSent);
+      socket.off('message:status:delivered', handleDelivered);
+      socket.off('message:status:seen', handleSeen);
+      socket.off('typing:user', handleTyping);
+    };
+  }, [socket, conversationId, currentUserId]);
+
+  // Auto-scroll on new messages
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Mark messages as seen when they come into view
+  useEffect(() => {
+    if (!currentUserId || messages.length === 0) return;
+
+    const unseenMessages = messages.filter(
+      (m) => m.senderId !== currentUserId && m.status !== 'seen'
+    );
+
+    if (unseenMessages.length > 0) {
+      const messageIds = unseenMessages.map((m) => m.id);
+      markAsSeen(conversationId, messageIds, currentUserId);
+      
+      // Also update in database
+      updateMessageStatusInDB(messageIds, 'seen');
+    }
+  }, [messages, currentUserId]);
 
   const fetchMessages = async () => {
     try {
@@ -65,27 +182,69 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
     }
   };
 
+  const updateMessageStatusInDB = async (messageIds: string[], status: string) => {
+    try {
+      await fetch('/api/messages/status', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageIds, status }),
+      });
+    } catch (error) {
+      console.error('Error updating message status:', error);
+    }
+  };
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
+  const handleTyping = () => {
+    if (!socket || !currentUserId) return;
+
+    socket.emit('typing:start', {
+      conversationId,
+      userId: currentUserId,
+      userName: session?.user?.name || 'User',
+    });
+
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+
+    typingTimeoutRef.current = setTimeout(() => {
+      socket.emit('typing:stop', {
+        conversationId,
+        userId: currentUserId,
+      });
+    }, 2000);
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || sending) return;
+    if (!newMessage.trim() || sending || !isConnected) return;
 
     const messageContent = newMessage.trim();
     setNewMessage('');
     setSending(true);
 
-    // Optimistically add message
+    // Stop typing indicator
+    if (socket) {
+      socket.emit('typing:stop', {
+        conversationId,
+        userId: currentUserId,
+      });
+    }
+
+    // Create temp message
+    const tempId = `temp-${Date.now()}`;
     const tempMessage: Message = {
-      id: `temp-${Date.now()}`,
+      id: tempId,
       content: messageContent,
       status: 'sending',
       createdAt: new Date().toISOString(),
-      senderId: (session?.user as { id: string })?.id || '',
+      senderId: currentUserId || '',
       sender: {
-        id: (session?.user as { id: string })?.id || '',
+        id: currentUserId || '',
         name: session?.user?.name || '',
         avatar: session?.user?.image || undefined,
         isAgent: false,
@@ -106,22 +265,34 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
 
       if (res.ok) {
         const data = await res.json();
-        // Update temp message with real data
+        
+        // Update temp message with real ID
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === tempMessage.id
-              ? { ...data.message, id: data.message.id }
+            m.id === tempId
+              ? { ...data.message, status: 'sent' }
               : m
           )
         );
 
-        // Add agent response if any
+        // Emit via socket
+        sendMessage(conversationId, data.message, tempId);
+
+        // Handle agent response
         if (data.agentMessage) {
           setMessages((prev) => [...prev, data.agentMessage]);
         }
       }
     } catch (error) {
       console.error('Error sending message:', error);
+      // Mark as failed
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === tempId
+            ? { ...m, status: 'sent' }  // Keep as sent for now, could add 'failed' status
+            : m
+        )
+      );
     } finally {
       setSending(false);
     }
@@ -143,21 +314,25 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
   const renderMessageStatus = (status: string, isOwnMessage: boolean) => {
     if (!isOwnMessage) return null;
 
-    const statusIcons = {
-      sending: <span className="tick">○</span>,
-      sent: <span className="tick">✓</span>,
-      delivered: <span className="tick">✓✓</span>,
-      seen: <span className="tick">✓✓</span>,
+    const statusConfig = {
+      sending: { icon: '○', className: 'sending', color: 'var(--text-muted)' },
+      sent: { icon: '✓', className: 'sent', color: 'var(--text-muted)' },
+      delivered: { icon: '✓✓', className: 'delivered', color: 'var(--text-muted)' },
+      seen: { icon: '✓✓', className: 'seen', color: 'var(--accent-primary)' },
     };
 
+    const config = statusConfig[status as keyof typeof statusConfig] || statusConfig.sent;
+
     return (
-      <span className={`message-status ${status}`}>
-        {statusIcons[status as keyof typeof statusIcons]}
+      <span 
+        className={`message-status ${config.className}`}
+        style={{ color: config.color }}
+        title={status}
+      >
+        {config.icon}
       </span>
     );
   };
-
-  const currentUserId = (session?.user as { id: string })?.id;
 
   return (
     <div className="chat-area">
@@ -188,12 +363,27 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
             )}
           </h2>
           <p>
-            {otherUser.isAgent
-              ? 'Always available'
-              : otherUser.isOnline
-              ? 'Online'
-              : 'Offline'}
+            {isTyping && typingUser ? (
+              <span style={{ color: 'var(--accent-primary)' }}>typing...</span>
+            ) : otherUser.isAgent ? (
+              'Always available'
+            ) : otherUser.isOnline ? (
+              'Online'
+            ) : (
+              'Offline'
+            )}
           </p>
+        </div>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div 
+            style={{ 
+              width: '8px', 
+              height: '8px', 
+              borderRadius: '50%', 
+              background: isConnected ? 'var(--accent-primary)' : 'var(--danger)',
+            }}
+            title={isConnected ? 'Connected' : 'Disconnected'}
+          />
         </div>
       </div>
 
@@ -246,6 +436,17 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
             );
           })
         )}
+        {isTyping && typingUser && (
+          <div className="message received">
+            <div className="message-content">
+              <div className="typing-indicator">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            </div>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -254,12 +455,20 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
           <input
             type="text"
             className="chat-input"
-            placeholder="Type a message..."
+            placeholder={isConnected ? "Type a message..." : "Connecting..."}
             value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            disabled={sending}
+            onChange={(e) => {
+              setNewMessage(e.target.value);
+              handleTyping();
+            }}
+            disabled={sending || !isConnected}
           />
-          <button type="submit" className="send-button" disabled={sending || !newMessage.trim()}>
+          <button 
+            type="submit" 
+            className="send-button" 
+            disabled={sending || !newMessage.trim() || !isConnected}
+            title={!isConnected ? 'Disconnected - reconnecting...' : 'Send message'}
+          >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
               <path
                 d="M22 2L11 13"

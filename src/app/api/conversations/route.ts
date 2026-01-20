@@ -57,7 +57,8 @@ export async function GET() {
             },
             {
                 $project: {
-                    _id: 1,
+                    id: '$_id',
+                    _id: 0,
                     otherParticipant: {
                         id: '$otherParticipant._id',
                         name: '$otherParticipant.name',
