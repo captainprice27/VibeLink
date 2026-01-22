@@ -59,6 +59,7 @@ export async function GET(request: NextRequest) {
                     status: 1,
                     createdAt: 1,
                     senderId: 1,
+                    image: 1, // Include image data
                     sender: {
                         id: '$sender._id',
                         name: '$sender.name',
@@ -101,13 +102,42 @@ export async function POST(request: NextRequest) {
         }
 
         const body = await request.json();
-        const { conversationId, content } = body;
+        const { conversationId, content, image } = body;
 
-        if (!conversationId || !content) {
+        // Validate - either content or image must be present
+        if (!conversationId || (!content && !image)) {
             return NextResponse.json(
-                { error: 'Conversation ID and content required' },
+                { error: 'Conversation ID and (content or image) required' },
                 { status: 400 }
             );
+        }
+
+        // Validate file if present
+        if (image) {  // We use 'image' field for both images and files for backward compatibility
+            const allowedTypes = [
+                'image/png',
+                'image/jpeg',
+                'image/jpg',
+                'image/webp',
+                'image/svg+xml',
+                'application/pdf',
+                'video/mp4'
+            ];
+            const maxSize = 2 * 1024 * 1024; // 2MB in bytes
+
+            if (!allowedTypes.includes(image.mimeType)) {
+                return NextResponse.json(
+                    { error: 'Invalid file type. Only images, PDFs, and MP4 videos are allowed.' },
+                    { status: 400 }
+                );
+            }
+
+            if (image.size > maxSize) {
+                return NextResponse.json(
+                    { error: 'File size exceeds 2MB limit' },
+                    { status: 400 }
+                );
+            }
         }
 
         await connectDB();
@@ -124,13 +154,25 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'Conversation not found' }, { status: 404 });
         }
 
-        // Create user message
-        const message = await Message.create({
+        // Create message data
+        const messageData: any = {
             conversationId: new mongoose.Types.ObjectId(conversationId),
             senderId: userId,
-            content,
+            content: content || undefined, // Use undefined if empty to avoid empty string validation issues
             status: 'sent',
-        });
+        };
+
+        // Add image if present
+        if (image) {
+            messageData.image = {
+                data: image.data,
+                mimeType: image.mimeType,
+                size: image.size,
+            };
+        }
+
+        // Create user message
+        const message = await Message.create(messageData);
 
         // Update conversation's last message
         await Conversation.findByIdAndUpdate(conversationId, {
@@ -147,6 +189,7 @@ export async function POST(request: NextRequest) {
             status: message.status,
             createdAt: message.createdAt,
             senderId: userId.toString(),
+            image: message.image, // Include image if present
             sender: {
                 id: sender?._id.toString(),
                 name: sender?.name,
@@ -203,9 +246,17 @@ export async function POST(request: NextRequest) {
             message: userMessage,
             agentMessage,
         });
-    } catch (error) {
+    } catch (error: any) {
         console.error('Send message error:', error);
-        return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+        console.error('Error details:', {
+            message: error.message,
+            stack: error.stack,
+            name: error.name,
+        });
+        return NextResponse.json({
+            error: 'Internal server error',
+            details: process.env.NODE_ENV !== 'production' ? error.message : undefined
+        }, { status: 500 });
     }
 }
 

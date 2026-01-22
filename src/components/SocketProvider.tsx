@@ -9,7 +9,7 @@ type MessageStatus = 'sending' | 'sent' | 'delivered' | 'seen';
 interface SocketContextType {
   socket: Socket | null;
   isConnected: boolean;
-  sendMessage: (conversationId: string, message: any, tempId: string) => void;
+  sendMessage: (conversationId: string, message: any, tempId: string, recipientIds?: string[]) => void;
   markAsDelivered: (conversationId: string, messageIds: string[], userId: string) => void;
   markAsSeen: (conversationId: string, messageIds: string[], userId: string) => void;
 }
@@ -76,7 +76,7 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
     };
   }, [session]);
 
-  const sendMessage = (conversationId: string, message: any, tempId: string) => {
+  const sendMessage = (conversationId: string, message: any, tempId: string, recipientIds?: string[]) => {
     if (!socket || !session) return;
     
     socket.emit('message:send', {
@@ -84,6 +84,7 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
       message,
       senderId: (session.user as any).id,
       tempId,
+      recipientIds,
     });
   };
 

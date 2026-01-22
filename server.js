@@ -11,7 +11,9 @@ const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
-    const httpServer = createServer(async (req, res) => {
+    const httpServer = createServer({
+        maxHeaderSize: 10 * 1024 * 1024, // 10MB to handle large existing cookies
+    }, async (req, res) => {
         try {
             const parsedUrl = parse(req.url, true);
             await handle(req, res, parsedUrl);
@@ -29,6 +31,7 @@ app.prepare().then(() => {
         },
         pingTimeout: 60000,
         pingInterval: 25000,
+        maxHttpBufferSize: 1e7, // 10MB
     });
 
     // Store user socket mappings
@@ -42,6 +45,7 @@ app.prepare().then(() => {
         socket.on('user:online', (userId) => {
             userSockets.set(userId, socket.id);
             socket.userId = userId;
+            socket.join(userId);
             console.log(`User ${userId} online with socket ${socket.id}`);
 
             // Broadcast to all users that this user is online
@@ -62,7 +66,7 @@ app.prepare().then(() => {
 
         // Handle new message
         socket.on('message:send', (data) => {
-            const { conversationId, message, senderId } = data;
+            const { conversationId, message, senderId, recipientIds } = data;
             console.log(`Broadcasting message in conversation ${conversationId}`);
 
             // Broadcast to all users in the conversation except sender
@@ -72,11 +76,24 @@ app.prepare().then(() => {
                 senderId,
             });
 
+            // Send notification to recipients
+            if (recipientIds && Array.isArray(recipientIds)) {
+                recipientIds.forEach(recipientId => {
+                    socket.to(recipientId).emit('notification:new', {
+                        conversationId,
+                        messageId: message.id,
+                        senderId
+                    });
+                });
+            }
+
             // Send delivery confirmation to sender
             socket.emit('message:sent', {
                 tempId: data.tempId,
                 messageId: message.id,
-                status: 'sent'
+                status: 'sent',
+                conversationId,
+                message
             });
         });
 

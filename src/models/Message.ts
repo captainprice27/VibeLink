@@ -14,6 +14,11 @@ export interface IMessage extends Document {
     content: string;
     status: MessageStatus;
     seenBy: ISeenBy[];
+    image?: {
+        data: string; // base64 encoded image
+        mimeType: string; // image/png, image/jpeg, etc.
+        size: number; // size in bytes
+    };
     createdAt: Date;
     updatedAt: Date;
 }
@@ -33,7 +38,12 @@ const MessageSchema = new Schema<IMessage>(
         },
         content: {
             type: String,
-            required: true,
+            required: false,
+        },
+        image: {
+            data: String,
+            mimeType: String,
+            size: Number,
         },
         status: {
             type: String,

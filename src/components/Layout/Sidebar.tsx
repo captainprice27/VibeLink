@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useSocket } from '@/components/SocketProvider';
 
 interface User {
   id: string;
@@ -31,6 +32,43 @@ export default function Sidebar({ onSelectConversation, activeConversationId }: 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
+  const { socket } = useSocket();
+
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleMessageUpdate = (data: any) => {
+      const { conversationId, message } = data;
+      
+      const index = conversations.findIndex((c) => c.id === conversationId);
+      
+      if (index === -1) {
+          fetchUsersAndConversations();
+          return;
+      }
+
+      const updatedConv = {
+          ...conversations[index],
+          lastMessage: {
+              content: (message.content && message.content.trim().length > 0) ? message.content : (message.image ? '📷 Image' : 'Message'),
+              createdAt: message.createdAt || new Date().toISOString()
+          }
+      };
+      
+      const newConversations = [...conversations];
+      newConversations.splice(index, 1);
+      newConversations.unshift(updatedConv);
+      setConversations(newConversations);
+    };
+
+    socket.on('message:new', handleMessageUpdate);
+    socket.on('message:sent', handleMessageUpdate);
+
+    return () => {
+      socket.off('message:new', handleMessageUpdate);
+      socket.off('message:sent', handleMessageUpdate);
+    };
+  }, [socket, conversations]);
 
   useEffect(() => {
     fetchUsersAndConversations();

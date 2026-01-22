@@ -140,7 +140,8 @@ const agentPersonalities: { [key: string]: AgentPersonality } = {
     },
 };
 
-function detectIntent(message: string): string {
+function detectIntent(message: string | undefined | null): string {
+    if (!message) return 'default';
     const lowerMessage = message.toLowerCase();
 
     if (

@@ -51,15 +51,33 @@ export const authOptions: NextAuthOptions = {
         maxAge: 30 * 24 * 60 * 60, // 30 days
     },
     callbacks: {
-        async jwt({ token, user }) {
+        async jwt({ token, user, trigger, session }) {
             if (user) {
                 token.id = user.id;
             }
+            // Explicitly remove large/redundant fields from token to keep cookie small
+            if (token.picture) delete token.picture;
+            if (token.name) delete token.name;
+            if (token.email) delete token.email;
+
             return token;
         },
         async session({ session, token }) {
-            if (session.user) {
+            if (session.user && token.id) {
                 (session.user as { id: string }).id = token.id as string;
+                try {
+                    await connectDB();
+                    const dbUser = await User.findById(token.id).select('name email avatar isAgent personality');
+                    if (dbUser) {
+                        session.user.name = dbUser.name;
+                        session.user.email = dbUser.email;
+                        session.user.image = dbUser.avatar;
+                        (session.user as any).isAgent = dbUser.isAgent;
+                        (session.user as any).personality = dbUser.personality;
+                    }
+                } catch (error) {
+                    console.error("Error fetching user data for session:", error);
+                }
             }
             return session;
         },

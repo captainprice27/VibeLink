@@ -1,9 +1,11 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { format } from 'date-fns';
 import { useSocket } from '@/components/SocketProvider';
+import { validateFile, fileToBase64 } from '@/lib/imageUtils';
 
 interface Message {
   id: string;
@@ -11,6 +13,11 @@ interface Message {
   status: 'sending' | 'sent' | 'delivered' | 'seen';
   createdAt: string;
   senderId: string;
+  image?: {
+    data: string;
+    mimeType: string;
+    size: number;
+  };
   sender: {
     id: string;
     name: string;
@@ -38,12 +45,16 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
   const { socket, isConnected, sendMessage, markAsDelivered, markAsSeen } = useSocket();
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [typingUser, setTypingUser] = useState<string | null>(null);
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [imageError, setImageError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const currentUserId = (session?.user as { id: string })?.id;
 
@@ -219,9 +230,37 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
     }, 2000);
   };
 
+  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImageError(null);
+    
+    // Validate
+    const validation = validateFile(file);
+    if (!validation.valid) {
+      setImageError(validation.error || 'Invalid file');
+      return;
+    }
+
+    // Set selected image and preview
+    setSelectedImage(file);
+    const base64 = await fileToBase64(file);
+    setImagePreview(base64);
+  };
+
+  const removeImage = () => {
+    setSelectedImage(null);
+    setImagePreview(null);
+    setImageError(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || sending || !isConnected) return;
+    if ((!newMessage.trim() && !selectedImage) || sending || !isConnected) return;
 
     const messageContent = newMessage.trim();
     setNewMessage('');
@@ -235,6 +274,16 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
       });
     }
 
+    // Prepare image data
+    let imageData = null;
+    if (selectedImage && imagePreview) {
+      imageData = {
+        data: imagePreview,
+        mimeType: selectedImage.type,
+        size: selectedImage.size,
+      };
+    }
+
     // Create temp message
     const tempId = `temp-${Date.now()}`;
     const tempMessage: Message = {
@@ -243,6 +292,7 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
       status: 'sending',
       createdAt: new Date().toISOString(),
       senderId: currentUserId || '',
+      image: imageData || undefined,
       sender: {
         id: currentUserId || '',
         name: session?.user?.name || '',
@@ -252,15 +302,28 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
     };
 
     setMessages((prev) => [...prev, tempMessage]);
+    removeImage(); // Clear image preview after adding to tempMessage
 
     try {
+      const payload: any = {
+        conversationId,
+        content: messageContent,
+      };
+
+      if (imageData) {
+        payload.image = imageData;
+      }
+
+      console.log('Sending message with payload:', { 
+        hasImage: !!payload.image, 
+        imageSize: payload.image?.size,
+        contentLength: payload.content?.length 
+      });
+
       const res = await fetch('/api/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          conversationId,
-          content: messageContent,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (res.ok) {
@@ -276,23 +339,29 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
         );
 
         // Emit via socket
-        sendMessage(conversationId, data.message, tempId);
+        sendMessage(conversationId, data.message, tempId, [otherUser.id]);
 
         // Handle agent response
         if (data.agentMessage) {
           setMessages((prev) => [...prev, data.agentMessage]);
         }
+      } else {
+        const errorData = await res.json();
+        console.error('API error response:', errorData);
+        setImageError(errorData.error || 'Failed to send message');
+        if (errorData.details) {
+         console.error('Error details:', errorData.details);
+        }
+        
+        // Remove failed message
+        setMessages((prev) => prev.filter((m) => m.id !== tempId));
       }
     } catch (error) {
       console.error('Error sending message:', error);
-      // Mark as failed
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === tempId
-            ? { ...m, status: 'sent' }  // Keep as sent for now, could add 'failed' status
-            : m
-        )
-      );
+      setImageError('Failed to send message');
+      
+      // Remove failed message
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
     } finally {
       setSending(false);
     }
@@ -337,6 +406,7 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
   return (
     <div className="chat-area">
       <div className="chat-header">
+        <Link href={`/profile/${otherUser.id}`} style={{ display: 'flex', alignItems: 'center', flex: 1, gap: '12px', textDecoration: 'none', color: 'inherit' }}>
         <div className={`contact-avatar ${otherUser.isAgent ? 'agent' : 'user'}`}>
           {otherUser.avatar ? (
             <img src={otherUser.avatar} alt={otherUser.name} />
@@ -374,6 +444,7 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
             )}
           </p>
         </div>
+        </Link>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <div 
             style={{ 
@@ -426,7 +497,78 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
                   </div>
                 )}
                 <div className="message-content">
-                  <div className="message-text">{message.content}</div>
+                  {message.image && message.image.data && (
+                    <div className="message-image" style={{ marginBottom: message.content ? '8px' : '0' }}>
+                      {message.image.mimeType === 'application/pdf' ? (
+                        <div 
+                          onClick={() => window.open(message.image!.data, '_blank')}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '12px',
+                            padding: '12px',
+                            background: 'rgba(0,0,0,0.05)',
+                            borderRadius: '8px',
+                            cursor: 'pointer',
+                            minWidth: '200px',
+                          }}
+                        >
+                          <div style={{
+                            width: '40px',
+                            height: '40px',
+                            background: '#ff0000',
+                            borderRadius: '4px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'white',
+                            fontWeight: 'bold',
+                          }}>PDF</div>
+                          <div style={{ flex: 1, overflow: 'hidden' }}>
+                            <div style={{ 
+                                fontSize: '0.9rem', 
+                                fontWeight: '500', 
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis'
+                            }}>
+                                Document.pdf
+                            </div>
+                            <div style={{ fontSize: '0.75rem', opacity: 0.7 }}>
+                                {(message.image.size / 1024).toFixed(1)} KB
+                            </div>
+                          </div>
+                        </div>
+                      ) : message.image.mimeType === 'video/mp4' ? (
+                        <video 
+                          src={message.image.data} 
+                          controls
+                          style={{
+                            maxWidth: '300px',
+                            maxHeight: '300px',
+                            borderRadius: '8px',
+                            display: 'block',
+                          }}
+                        />
+                      ) : (
+                        <img 
+                          src={message.image.data} 
+                          alt="Shared image"
+                          style={{
+                            maxWidth: '300px',
+                            maxHeight: '300px',
+                            borderRadius: '8px',
+                            display: 'block',
+                            cursor: 'pointer',
+                          }}
+                          onClick={() => window.open(message.image!.data, '_blank')}
+                        />
+                      )}
+                    </div>
+                  )}
+                  {message.content && (
+                    <div className="message-text">{message.content}</div>
+                  )}
                   <div className="message-meta">
                     <span>{formatMessageTime(message.createdAt)}</span>
                     {renderMessageStatus(message.status, isOwnMessage)}
@@ -451,7 +593,127 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
       </div>
 
       <div className="chat-input-area">
+        {imageError && (
+          <div style={{ 
+            padding: '8px 12px', 
+            background: 'var(--danger)', 
+            color: 'white', 
+            borderRadius: '4px', 
+            marginBottom: '8px',
+            fontSize: '0.875rem',
+          }}>
+            {imageError}
+          </div>
+        )}
+        
+        {imagePreview && (
+          <div style={{ 
+            padding: '12px', 
+            background: 'var(--bg-secondary)', 
+            borderRadius: '8px', 
+            marginBottom: '8px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+          }}>
+            {selectedImage?.type === 'application/pdf' ? (
+              <div style={{
+                width: '60px',
+                height: '60px',
+                background: '#ff0000',
+                borderRadius: '4px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'white',
+                fontWeight: 'bold',
+                fontSize: '1rem',
+              }}>PDF</div>
+            ) : selectedImage?.type === 'video/mp4' ? (
+              <div style={{
+                width: '60px',
+                height: '60px',
+                background: '#000',
+                borderRadius: '4px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'white',
+                fontWeight: 'bold',
+                fontSize: '1rem',
+              }}>▶</div>
+            ) : (
+              <img 
+                src={imagePreview} 
+                alt="Preview" 
+                style={{ 
+                  maxWidth: '100px', 
+                  maxHeight: '100px', 
+                  borderRadius: '4px',
+                  objectFit: 'cover',
+                }} 
+              />
+            )}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '0.875rem', color: 'var(--text-primary)' }}>
+                {selectedImage?.name}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                {selectedImage && `${(selectedImage.size / 1024).toFixed(1)} KB`}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={removeImage}
+              style={{
+                background: 'var(--danger)',
+                color: 'white',
+                border: 'none',
+                borderRadius: '50%',
+                width: '24px',
+                height: '24px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+              title="Remove image"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         <form onSubmit={handleSendMessage} className="chat-input-container">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,application/pdf,video/mp4"
+            onChange={handleImageSelect}
+            style={{ display: 'none' }}
+          />
+          
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={sending || !isConnected}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              padding: '8px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--text-muted)',
+            }}
+            title="Attach file"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+
           <input
             type="text"
             className="chat-input"
@@ -466,7 +728,7 @@ export default function ChatWindow({ conversationId, otherUser }: ChatWindowProp
           <button 
             type="submit" 
             className="send-button" 
-            disabled={sending || !newMessage.trim() || !isConnected}
+            disabled={sending || (!newMessage.trim() && !selectedImage) || !isConnected}
             title={!isConnected ? 'Disconnected - reconnecting...' : 'Send message'}
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
